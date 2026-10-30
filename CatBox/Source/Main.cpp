@@ -330,6 +330,16 @@ public:
                 float lo = 0, hi = 0;
                 if (rd != nullptr) { float l1, h1; rd->readMaxLevels (0, rd->lengthInSamples, lo, hi, l1, h1); hi = juce::jmax (hi, -lo, h1, -l1); }
                 check (! box.isExporting() && std::abs (secs - want) < 0.1 && hi > 0.05f && hi <= 1.0f, "Export: a WAV of the song (2 bars + 3 s of tail), not silent", juce::String (secs, 2) + " s, peak " + juce::String (hi, 3));
+                box.setPlaying (false);
+                renderSeconds (audio, 0.2, nullptr);
+                const int undo0 = box.undoSteps();
+                box.setPlaying (true);
+                const bool topScene = box.getProject().tracks[0].pat.drums[0] == kickKeep[0];   // scene 3 is there before the first bar
+                renderSeconds (audio, 0.1, nullptr);
+                box.songTick();   // (the next part is handed over now, for the bar line)
+                check (box.songStepNow() == 0 && topScene && box.undoSteps() == undo0,
+                       "Song: Play starts it at its top (scene 3), and parts changing leave no undo steps",
+                       juce::String (box.songStepNow()) + " kick " + juce::String ((int) topScene) + " undo " + juce::String (undo0) + " > " + juce::String (box.undoSteps()));
                 box.setSongOn (false);
                 box.setSong ({});
             }
@@ -925,6 +935,35 @@ public:
                        && SampleBank::noteFromName ("x/Bass_Eb3") == 51,
                        "Sampler: note names are read only from real notes (a drum take is not a note)", {});
                 {
+                    // time-stretch: the piano sample (3 s) at 2 beats, 60 BPM = 2 s, then at 240 BPM = 0.5 s; the pitch stays
+                    const auto& sd = engineDef (EngineSampler);
+                    auto run = [&] (bool stretch, double bpm, int& audible, double& zcr)
+                    {
+                        std::vector<float> v (sd.params.size());
+                        for (size_t i = 0; i < sd.params.size(); ++i) v[i] = sd.params[i].def;
+                        v[(size_t) sd.index ("sample")] = 1.0f;                  // Piano C4
+                        v[(size_t) sd.index ("root")] = 60.0f;
+                        v[(size_t) sd.index ("mode")] = 2.0f;                    // one shot
+                        v[(size_t) sd.index ("stretch")] = stretch ? 1.0f : 0.0f;
+                        v[(size_t) sd.index ("beats")] = 2.0f;
+                        auto e = makeEngine (EngineSampler);
+                        e->prepare (48000.0); e->setParams (v.data()); e->setTempo (bpm);
+                        e->noteOn (60, 0.9f, false, false);
+                        std::vector<float> l (48000 * 5), r (48000 * 5);
+                        for (int pos = 0; pos < (int) l.size(); pos += 256) e->render (l.data() + pos, r.data() + pos, 256);
+                        audible = 0; int zc = 0;
+                        for (size_t i = 1; i < l.size(); ++i) { if (std::abs (l[i]) > 1e-4f) audible = (int) i; }
+                        for (int i = 1; i < juce::jmin (audible, 24000); ++i) if ((l[(size_t) i - 1] <= 0.0f) != (l[(size_t) i] <= 0.0f)) ++zc;
+                        zcr = zc / (double) juce::jmax (1, juce::jmin (audible, 24000));
+                    };
+                    int aPlain = 0, aSlow = 0, aFast = 0; double zPlain = 0, zSlow = 0, zFast = 0;
+                    run (false, 120.0, aPlain, zPlain); run (true, 60.0, aSlow, zSlow); run (true, 240.0, aFast, zFast);
+                    check (std::abs (aSlow / 48000.0 - 2.0) < 0.1 && std::abs (aFast / 48000.0 - 0.5) < 0.05 && aPlain > 2.5 * 48000
+                           && std::abs (zSlow / zPlain - 1.0) < 0.2 && std::abs (zFast / zPlain - 1.0) < 0.2,
+                           "Sampler time-stretch: 2 beats = 2 s at 60 BPM, 0.5 s at 240 BPM, the pitch stays",
+                           juce::String (aSlow / 48000.0, 2) + " s, " + juce::String (aFast / 48000.0, 2) + " s, pitch x" + juce::String (zSlow / zPlain, 2) + " / x" + juce::String (zFast / zPlain, 2));
+                }
+                {
                     // a drum folder from the library on the sampler: it plays as recorded at the key it was put on (C4)
                     const int dslot = bank.find ("Dirt-Samples/d/000_d1");
                     if (dslot >= 0)
@@ -1125,6 +1164,13 @@ public:
                     juce::PNGImageFormat png;
                     if (auto os = pngFile.createOutputStream()) png.writeImageToStream (img, *os);
                     check (img.isValid(), "the screen draws the sampler", {});
+                    int playK = -1;
+                    for (int k = 0; k < numKnobs; ++k) if (box.knob (k).name == "Play") playK = k;
+                    const auto m0 = playK >= 0 ? box.knob (playK).value : juce::String();
+                    if (playK >= 0) box.knobPush (playK);
+                    const auto m1 = playK >= 0 ? box.knob (playK).value : juce::String();
+                    if (playK >= 0) { box.knobPush (playK); box.knobPush (playK); }
+                    check (playK >= 0 && m1 != m0 && box.knob (playK).value == m0, "Sampler: a click on the Play knob = Keys > Chop > One shot > Keys", m0 + " > " + m1);
                 }
                 const juce::StringArray extraPages { "FX", "MACRO", "MOD", "MY" };
                 for (int e = 0; e < 6; ++e)   // 10-13: the FX, MACRO, MOD, MY pages (light theme, rings); 14: RETURNS; 15: LOOK
